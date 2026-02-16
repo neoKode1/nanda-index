@@ -60,13 +60,13 @@ def test_search_filters(client):
     client.put('/agents/agentm-search-1/status', json={'alive': True, 'capabilities': ['math'], 'tags': ['alpha']})
     # Query by substring
     r1 = client.get('/search?q=search')
-    assert any(a['agent_id'] == 'agentm-search-1' for a in r1.get_json())
+    assert any(a['agent_id'] == 'agentm-search-1' for a in r1.get_json()['data'])
     # Query by capabilities
     r2 = client.get('/search?capabilities=math')
-    assert any(a['agent_id'] == 'agentm-search-1' for a in r2.get_json())
+    assert any(a['agent_id'] == 'agentm-search-1' for a in r2.get_json()['data'])
     # Query by tags
     r3 = client.get('/search?tags=alpha')
-    assert any(a['agent_id'] == 'agentm-search-1' for a in r3.get_json())
+    assert any(a['agent_id'] == 'agentm-search-1' for a in r3.get_json()['data'])
 
 
 def test_delete_agent(client):
@@ -83,5 +83,5 @@ def test_mcp_servers_stub(client):
     register_sample(client, agent_id='mcp-server-1')
     client.put('/agents/mcp-server-1/status', json={'alive': True, 'capabilities': ['mcp-server']})
     resp = client.get('/mcp_servers')
-    servers = resp.get_json()
+    servers = resp.get_json()['data']
     assert any(s['agent_id'] == 'mcp-server-1' for s in servers)
