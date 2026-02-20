@@ -37,6 +37,7 @@ if not TEST_MODE:
         users_col = mongo_db.get_collection("users")
         mcp_registry_col = mongo_db.get_collection("mcp_registry")
         messages_col = mongo_db.get_collection("messages")
+        builds_col = mongo_db.get_collection("builds")
         USE_MONGO = True
         print("Connected to MongoDB successfully – using MongoDB for persistence.")
     except Exception as e:
@@ -46,6 +47,7 @@ if not TEST_MODE:
         users_col = None
         mcp_registry_col = None
         messages_col = None
+        builds_col = None
         print(f"[registry] WARN: MongoDB unavailable ({e}); continuing in in-memory mode.")
 else:
     USE_MONGO = False
@@ -54,6 +56,7 @@ else:
     users_col = None
     mcp_registry_col = None
     messages_col = None
+    builds_col = None
     print("[registry] TEST_MODE enabled – using in-memory registries (no MongoDB).")
 
 # ---------------- Initial Data Load ------------------------
@@ -773,6 +776,118 @@ if ENABLE_FEDERATION:
         traceback.print_exc()
 else:
     print("[registry] Switchboard disabled (set ENABLE_FEDERATION=true to enable)")
+
+# -------------------------------------------------------------------
+# ---------- Builds Archive (generated MCP/SDK packages) ----------
+# -------------------------------------------------------------------
+
+# In-memory fallback when MongoDB is unavailable
+_builds_mem: List[Dict[str, Any]] = []
+
+
+@app.route('/builds', methods=['POST'])
+def create_build():
+    """Store a generated build (MCP/SDK package) for future reference."""
+    data = request.json
+    if not data:
+        return jsonify({"error": "Missing JSON body"}), 400
+
+    # Required fields
+    if "project_name" not in data:
+        return jsonify({"error": "Missing project_name"}), 400
+
+    import uuid as _uuid
+    build_id = data.get("build_id") or _uuid.uuid4().hex[:12]
+    doc = {
+        "build_id": build_id,
+        "project_name": data.get("project_name", "unknown"),
+        "template_id": data.get("template_id", ""),
+        "framework": data.get("framework", ""),
+        "deployment": data.get("deployment", "local"),
+        "summary": data.get("summary", ""),
+        "agents": data.get("agents", []),
+        "mcp_servers": data.get("mcp_servers", []),
+        "files": data.get("files", []),
+        "repo_url": data.get("repo_url"),
+        "repo_intent": data.get("repo_intent"),
+        "session_id": data.get("session_id"),
+        "tags": data.get("tags", []),
+        "created_at": data.get("created_at") or datetime.utcnow().isoformat(),
+    }
+
+    if USE_MONGO and builds_col is not None:
+        builds_col.replace_one({"build_id": build_id}, doc, upsert=True)
+    else:
+        _builds_mem.append(doc)
+
+    return jsonify({"status": "stored", "build_id": build_id}), 201
+
+
+@app.route('/builds', methods=['GET'])
+def list_builds():
+    """List stored builds with optional search.
+
+    Query params:
+      q        – substring match on project_name, summary, framework
+      framework – filter by framework name
+      limit    – max results (default 50)
+      skip     – pagination offset (default 0)
+    """
+    q = request.args.get("q", "").strip().lower()
+    fw_filter = request.args.get("framework", "").strip().lower()
+    limit = min(int(request.args.get("limit", 50)), 200)
+    skip = int(request.args.get("skip", 0))
+
+    if USE_MONGO and builds_col is not None:
+        mongo_filter: Dict[str, Any] = {}
+        if q:
+            mongo_filter["$or"] = [
+                {"project_name": {"$regex": q, "$options": "i"}},
+                {"summary": {"$regex": q, "$options": "i"}},
+                {"framework": {"$regex": q, "$options": "i"}},
+                {"tags": {"$regex": q, "$options": "i"}},
+            ]
+        if fw_filter:
+            mongo_filter["framework"] = {"$regex": fw_filter, "$options": "i"}
+
+        cursor = (
+            builds_col.find(mongo_filter, {"_id": 0, "files": 0})
+            .sort("created_at", -1)
+            .skip(skip)
+            .limit(limit)
+        )
+        results = list(cursor)
+        total = builds_col.count_documents(mongo_filter)
+    else:
+        pool = _builds_mem
+        if q:
+            pool = [
+                b for b in pool
+                if q in b.get("project_name", "").lower()
+                or q in b.get("summary", "").lower()
+                or q in b.get("framework", "").lower()
+                or any(q in t.lower() for t in b.get("tags", []))
+            ]
+        if fw_filter:
+            pool = [b for b in pool if fw_filter in b.get("framework", "").lower()]
+        total = len(pool)
+        results = [{k: v for k, v in b.items() if k != "files"} for b in pool[skip:skip + limit]]
+
+    return jsonify({"builds": results, "total": total, "limit": limit, "skip": skip})
+
+
+@app.route('/builds/<build_id>', methods=['GET'])
+def get_build(build_id):
+    """Get a single build by ID (includes full file contents)."""
+    if USE_MONGO and builds_col is not None:
+        doc = builds_col.find_one({"build_id": build_id}, {"_id": 0})
+    else:
+        doc = next((b for b in _builds_mem if b.get("build_id") == build_id), None)
+
+    if not doc:
+        return jsonify({"error": "Build not found"}), 404
+    return jsonify(doc)
+
 
 # -------------------------------------------------------------------
 
